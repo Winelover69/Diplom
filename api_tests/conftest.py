@@ -1,22 +1,16 @@
 import pytest
 import allure
 import logging
-from api.client import ApiClient  # Убедитесь, что путь к api.client корректен
+from api.client import ApiClient
 from data.test_data import generate_random_email, generate_random_password, \
-    generate_random_name  # Убедитесь, что путь к data.test_data корректен
-import time  # Оставлен на случай, если всё же потребуется, но с комментарием.
+    generate_random_name
 
 # Настройка логгера для conftest
 logger = logging.getLogger(__name__)
-# Установите уровень логирования (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-# INFO - хороший уровень для обычных сообщений о выполнении фикстур.
 logger.setLevel(logging.INFO)
-# Добавляем обработчик, чтобы логи выводились в консоль
 handler = logging.StreamHandler()
-# Формат вывода логов: время - имя логгера - уровень - сообщение
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 handler.setFormatter(formatter)
-# Проверяем, чтобы обработчик не добавлялся несколько раз при повторных запусках тестов
 if not logger.handlers:
     logger.addHandler(handler)
 
@@ -42,9 +36,6 @@ def registered_user(api_client, random_user_data):
     """
     Фикстура, регистрирующая пользователя перед тестом и удаляющая его после.
     Возвращает данные пользователя и токен доступа.
-    Проверки на успешность регистрации (status_code 200) должны быть в самом тестовом методе,
-    который использует эту фикстуру для проверки регистрации.
-    Здесь мы лишь убеждаемся, что фикстура смогла получить токен для последующих действий.
     """
     email = random_user_data["email"]
     password = random_user_data["password"]
@@ -54,30 +45,30 @@ def registered_user(api_client, random_user_data):
     with allure.step(f"Регистрация пользователя в фикстуре: {email}"):
         response = api_client.register_user(email, password, name)
 
-        # В фикстуре не делаем assert 200, чтобы не "скрывать" падение тестов.
-        # Если регистрация не удалась, это будет видно по отсутствию токена.
-        if response.status_code == 200:
+        if response.status_code == 200 and response.json().get("success"):
             token = response.json().get("accessToken")
             logger.info(f"Пользователь {email} успешно зарегистрирован в фикстуре. Токен получен.")
         else:
-            # Если регистрация не удалась, логируем ошибку и используем pytest.fail
-            # чтобы явно показать, что фикстура не смогла подготовить данные.
+            # Если регистрация не удалась, явно прерываем выполнение тестов через pytest.fail
             logger.error(
                 f"Ошибка при регистрации пользователя {email} в фикстуре. Статус: {response.status_code}, Ответ: {response.text}")
-            pytest.fail(f"Фикстура: Не удалось зарегистрировать пользователя через API. Ответ: {response.text}")
+            pytest.fail(
+                f"Фикстура 'registered_user': Не удалось зарегистрировать пользователя через API. Ответ: {response.text}")
+
+    # Убеждаемся, что токен был получен. Если нет, это проблема фикстуры, и тесты не должны продолжаться.
+    if not token:
+        pytest.fail(f"Фикстура 'registered_user': Токен не был получен после регистрации пользователя {email}.")
 
     yield email, password, name, token
 
     with allure.step(f"Удаление пользователя в фикстуре: {email}"):
         if token:
             response = api_client.delete_user(token)
-            if response.status_code == 202:
+            if response.status_code == 202 and response.json().get("success"):
                 logger.info(f"Пользователь {email} успешно удален после теста.")
             else:
                 logger.warning(
                     f"Не удалось удалить пользователя {email}. Статус: {response.status_code}, Ответ: {response.text}")
-            # Не используем time.sleep(), если нет явной необходимости (например, жесткий rate limit, который не обходится polling'ом)
-            # Если возникнут проблемы со слишком быстрыми запросами к API после удаления, можно вернуть с логированием.
         else:
             logger.info(f"Токен для пользователя {email} не был получен в фикстуре, удаление пропущено.")
 
@@ -87,9 +78,45 @@ def get_some_ingredients_ids(api_client):
     """
     Фикстура, получающая ID нескольких ингредиентов (булка, соус, начинка)
     для создания заказа. Выполняется один раз за тестовую сессию.
+    Возвращает словарь с ID булки, соуса и начинки.
     """
+    bun_id = None
+    sauce_id = None
+    main_id = None
+
     with allure.step("Получение ID ингредиентов через API"):
         response = api_client.get_ingredients()
 
-        # Здесь также: проверка в фикстуре только на критическую проблему.
-        if response.status_code != 2
+        # ИСПРАВЛЕНИЕ: Завершение условия и проверка success
+        if response.status_code != 200 or not response.json().get("success"):
+            logger.error(f"Ошибка при получении ингредиентов. Статус: {response.status_code}, Ответ: {response.text}")
+            pytest.fail(
+                f"Фикстура 'get_some_ingredients_ids': Не удалось получить список ингредиентов через API. Ответ: {response.text}")
+
+        ingredients = response.json().get("data", [])
+
+        # Фильтруем ингредиенты по типу
+        buns = [ing for ing in ingredients if ing.get("type") == "bun"]
+        sauces = [ing for ing in ingredients if ing.get("type") == "sauce"]
+        mains = [ing for ing in ingredients if ing.get("type") == "main"]
+
+        # Получаем ID первого доступного ингредиента каждого типа
+        if buns:
+            bun_id = buns[0].get("_id")
+        if sauces:
+            sauce_id = sauces[0].get("_id")
+        if mains:
+            main_id = mains[0].get("_id")
+
+        # Проверяем, что необходимые ингредиенты найдены. Если нет, фикстура должна упасть.
+        if not all([bun_id, sauce_id, main_id]):
+            missing_items = []
+            if not bun_id: missing_items.append("булки")
+            if not sauce_id: missing_items.append("соуса")
+            if not main_id: missing_items.append("начинки")
+            pytest.fail(
+                f"Фикстура 'get_some_ingredients_ids': Не удалось найти все необходимые типы ингредиентов: {', '.join(missing_items)}.")
+
+        logger.info(f"Получены ID ингредиентов: Булка={bun_id}, Соус={sauce_id}, Начинка={main_id}")
+
+    return {"bun_id": bun_id, "sauce_id": sauce_id, "main_id": main_id}
